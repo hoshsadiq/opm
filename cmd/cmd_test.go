@@ -1008,23 +1008,32 @@ func TestExec_InvalidName_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestExec_SetsXDGConfigHome(t *testing.T) {
+func TestExec_SetsOpenCodeConfigDir(t *testing.T) {
 	h := newHarness(t)
 	_, _, err := h.run("init")
 	require.NoError(t, err)
 	_, _, err = h.run("create", "work")
 	require.NoError(t, err)
 
-	// Write a marker file into the profile dir. If XDG_CONFIG_HOME is wired
-	// correctly, the child process can read it via $XDG_CONFIG_HOME/opencode/.
-	// This avoids readlink, whose output format differs between platforms
-	// (MSYS on Windows returns POSIX paths, not Windows paths).
+	// Write a marker file into the profile dir. If OPENCODE_CONFIG_DIR is wired
+	// correctly, the child process can read it via $OPENCODE_CONFIG_DIR/.
 	marker := filepath.Join(h.store.ProfileDir("work"), ".opm-exec-marker")
 	require.NoError(t, os.WriteFile(marker, []byte("opm-ok"), 0o644))
 
-	stdout, _, err := h.run("exec", "work", "--", "sh", "-c", "cat \"$XDG_CONFIG_HOME/opencode/.opm-exec-marker\"")
+	stdout, _, err := h.run("exec", "work", "--", "sh", "-c", "cat \"$OPENCODE_CONFIG_DIR/.opm-exec-marker\"")
 	require.NoError(t, err)
 	assert.Equal(t, "opm-ok", strings.TrimSpace(stdout))
+
+	// XDG_CONFIG_HOME must NOT be modified by opm exec in default mode — child
+	// should inherit exactly what the parent has (or UNSET if parent doesn't).
+	parentXDG := os.Getenv("XDG_CONFIG_HOME")
+	stdout2, _, err := h.run("exec", "work", "--", "sh", "-c", "printf '%s' \"${XDG_CONFIG_HOME:-UNSET}\"")
+	require.NoError(t, err)
+	if parentXDG == "" {
+		assert.Equal(t, "UNSET", strings.TrimSpace(stdout2))
+	} else {
+		assert.Equal(t, parentXDG, strings.TrimSpace(stdout2))
+	}
 }
 
 func TestExec_GlobalSymlinkUnchanged(t *testing.T) {
@@ -1048,22 +1057,28 @@ func TestExec_GlobalSymlinkUnchanged(t *testing.T) {
 	assert.Equal(t, "personal", active)
 }
 
-func TestExec_EphemeralDirCleanedUp(t *testing.T) {
+func TestExec_IsolateDirPersists(t *testing.T) {
 	h := newHarness(t)
 	_, _, err := h.run("init")
 	require.NoError(t, err)
 	_, _, err = h.run("create", "work")
 	require.NoError(t, err)
 
-	// Capture the XDG_CONFIG_HOME path during exec.
-	stdout, _, err := h.run("exec", "work", "--", "sh", "-c", "printf '%s' \"$XDG_CONFIG_HOME\"")
+	// Capture the XDG_CONFIG_HOME path during --isolate exec.
+	stdout, _, err := h.run("exec", "--isolate", "work", "--", "sh", "-c", "printf '%s' \"$XDG_CONFIG_HOME\"")
 	require.NoError(t, err)
 	capturedXDG := strings.TrimSpace(stdout)
 	require.NotEmpty(t, capturedXDG)
 
-	// After exec returns, the temp dir must have been removed.
+	// After exec returns, the persistent isolate dir must still exist.
 	_, statErr := os.Stat(capturedXDG)
-	assert.True(t, os.IsNotExist(statErr), "ephemeral dir %s should be cleaned up after exec", capturedXDG)
+	assert.NoError(t, statErr, "persistent isolate dir %s should still exist after exec", capturedXDG)
+
+	// Also verify OPENCODE_CONFIG_DIR was set to <isolateDir>/opencode.
+	stdout2, _, err := h.run("exec", "--isolate", "work", "--", "sh", "-c", "printf '%s' \"$OPENCODE_CONFIG_DIR\"")
+	require.NoError(t, err)
+	capturedConfigDir := strings.TrimSpace(stdout2)
+	assert.Equal(t, capturedXDG+"/opencode", capturedConfigDir)
 }
 
 func TestExec_PassesThroughArgs(t *testing.T) {
